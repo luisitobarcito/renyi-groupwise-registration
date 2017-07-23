@@ -1,0 +1,284 @@
+function [tX, A, W] = IP_Norm_Diff_FixedPoint(Xin, varargin)
+% [tX, A, W] = IP_Diff_FixedPoint(X, options)
+% Multi-shape registration using Information Potential differences 
+% This is a multi-shape non-rigid alignment algorithm 
+% It employes Thin-plate splines or radial basis function expansion
+% for the non-rigid transofrmation and affine transofrmation for the
+% rigid component. The algoirthm is based on a fixed point update rule
+% derived from the gradient fo the information potential difference.
+% The algorithm is described in:
+% "Group-wise point-set Registration Based on Renyi's Second Order
+% Entropy" by L. Sanchez-Giraldo, E. Hasanbelliu, and J. Principe.
+%--------------------------------------------------------------------------
+% Inputs
+% Xin: A cell array of length N containing the shapes. Each shape is
+%    represented by (M x d) matrix where M is the number of points and
+%    d is the dimensionality of the shape.
+%
+% options: This is an optional parameter that specify custom options
+%          for the algorithms. "options" is a struct with the following fields.
+% options.nonrigid: String, 'TPS' or 'GaussianRBF' (default 'TPS')
+% options.regularization: Tradeoff parameter for the regularization
+%                        (default 0.01)
+% options.init_sigma: Kernel bandwidth for the information potential
+%                     estimator (default 0.1)
+% options.final_sigma: Smallest value of kernel bandwidth for anealing
+%                      (default 0.01)
+% options.anealing: Exponential decay factor for the anealing the
+%                   kernel bandwidth (default 0.98)
+% options.max_iter: Number of fixed point iterations (default 300)
+% options.disp_progress : plots_progress (default false)
+% -------------------------------------------------------------------------
+% Outputs
+% tX: A cell array of length N containing the registered shapes. Each
+%     shape of the same size as in X.
+% A: A cell array of length N. Each cell contains a matrix of size
+%    ((d+1) x d)the affine component of the
+%    trasformation. 
+% W: A cell array of length N. Each cell contains a matrix (M x d)
+%    the coefficients for the nonlinear deformations.
+
+% Default parameters
+default.nonrigid = 'TPS';
+default.regularization = 0.01;
+default.init_sigma = 0.1;
+default.final_sigma = 0.01;
+default.anealing = 0.98;
+default.max_iter = 300;
+default.disp_progress = false;
+
+%% Verify options and set algorithm parameters
+if ~isempty(varargin)
+   options = varargin{1};
+   options = verifyFields(options, default);
+else 
+   options = default;
+end 
+
+% Number of shapes
+objNum = length(Xin);
+dim = size(Xin{1},2);
+
+lmbd2 = options.regularization; 
+sig = options.init_sigma;  
+anealing = options.anealing;
+
+itrNum = options.max_iter;
+
+if options.disp_progress
+  figh = figure;
+  colmark = ['r'; 'b'; 'g'; 'm'; 'c'; 'y'; 'k'; 'r'; 'b'; 'g'; 'm'; 'c'; 'y'];
+end
+
+%% Extend x's to homogenous coordinates {x=[x,1]}
+X = cell(objNum,1);
+for ob = 1:objNum
+    X{ob} = [Xin{ob}, ones(length(Xin{ob}),1)];
+end
+%% Identify lengths and dimensions of the objects
+lenX = zeros(objNum,1);
+for ob = 1:objNum
+    lenX(ob) = size(X{ob},1);
+end
+totalX = sum(lenX);
+%% Create 1 vectors of lenX
+OneX = cell(objNum,1);
+for i = 1:objNum
+    OneX{i} = ones(lenX(i),1);
+end
+
+%% Compute K on X point set
+K = cell(objNum,1);
+for ob = 1:objNum
+    K{ob} = compute_tps_K(X{ob}(:,1:dim), X{ob}(:,1:dim));
+    %         K{ob} = compute_gauss_K(X{ob}, X{ob}, .1);
+end
+
+%% Initial guess for transformation paramaters
+% Intialize the transformation matrices A with extended row (shift)
+A = cell(objNum,1);
+for ob = 1:objNum
+    A{ob} = [eye(dim); zeros(1,dim)];
+end
+% Intialize the transformation matrices W
+W = cell(objNum,1);
+for ob = 1:objNum
+    W{ob} = pinv(K{ob})*(0.0001*randn(lenX(ob), dim)); %???
+end
+
+tXA = cell(objNum,1);
+tKW = cell(objNum,1);
+tX = cell(objNum,1);
+CX = cell(objNum,1);
+Ctot = zeros(dim);
+for ob = 1:objNum
+    tXA{ob} = X{ob}*A{ob};
+    tKW{ob} =  K{ob}*W{ob};
+    tX{ob} = tXA{ob} + tKW{ob};
+    CX{ob} = tX{ob}'*tX{ob}/lenX(ob) - (tX{ob}'*OneX{ob})*(OneX{ob}'*tX{ob})/(lenX(ob)^2); 
+    Ctot = Ctot + CX{ob}*(lenX(ob)/totalX); 
+end
+
+if options.disp_progress
+    figure(figh), hold off;
+    for ob = 1:objNum
+        plot(tX{ob}(:,1), tX{ob}(:,2), ['o',colmark(ob)], 'MarkerSize',10, 'MarkerFaceColor', colmark(ob), 'LineWidth', 3); hold on;
+    end
+    set(gca, 'DataAspectRatio', [1 1 1]);
+    drawnow;
+    pause(0.5);
+end
+
+for itr = 1:itrNum
+    %compute Guassians (Y,tX) and (tX,tX), where tX = X*A + K*W
+    G = cell(objNum, objNum);   %will compute only upper triangle
+    for ob1 = 1:objNum          %ob1 = 1:obN
+        for ob2 = ob1:objNum    %ob2 = ob1:obN
+            G{ob1,ob2} = compute_gauss_K(tX{ob1}, tX{ob2}, sig);
+            G{ob2,ob1} = G{ob1,ob2}';
+        end
+    end
+    
+    
+    %% ##### Fixed point update A and W for each object#####
+    for ob = 1:objNum
+        
+    %% Cross term  Information potential gradient for each shape
+      IPcoeff = 2/((lenX'*lenX)*(sig^2));
+
+      Gkk_A_X = IPcoeff*X{ob}'*(G{ob, ob})*X{ob};
+      Gkk_A_K = IPcoeff*X{ob}'*(G{ob, ob})*K{ob};
+      diagGkk_A_X = IPcoeff*X{ob}'*(diag(G{ob,ob}*OneX{ob}))*X{ob};
+      diagGkk_A_K = IPcoeff*X{ob}'*(diag(G{ob, ob}*OneX{ob}))*K{ob};
+ 
+      Gkk_W_X = IPcoeff*K{ob}'*(G{ob, ob})*X{ob};
+      Gkk_W_K = IPcoeff*K{ob}'*(G{ob, ob})*K{ob};
+      diagGkk_W_X = IPcoeff*K{ob}'*(diag(G{ob, ob}*OneX{ob}))*X{ob};
+      diagGkk_W_K = IPcoeff*K{ob}'*(diag(G{ob, ob}*OneX{ob}))*K{ob};
+      
+      %% SECOND TERM Cross information potentials
+      Gkl_A_tXA = zeros(size(X{ob},2), size(tXA{ob}, 2));
+      Gkl_A_tKW = zeros(size(X{ob},2), size(tKW{ob}, 2));
+      diagGkl_A_X = zeros(size(X{ob},2), size(X{ob}, 2));
+      diagGkl_A_K = zeros(size(X{ob},2), size(K{ob}, 2));
+      
+      Gkl_W_tXA = zeros(size(K{ob},2), size(tXA{ob}, 2));
+      Gkl_W_tKW = zeros(size(K{ob},2), size(tKW{ob}, 2));
+      diagGkl_W_X = zeros(size(K{ob},2), size(X{ob}, 2));
+      diagGkl_W_K = zeros(size(K{ob},2), size(K{ob}, 2));
+      
+      for ob2 = 1:objNum
+        IPtotCoeff = 2/((totalX^2)*(sig^2));
+        
+	Gkl_A_tXA = Gkl_A_tXA +  IPtotCoeff*X{ob}'*(G{ob, ob2})*tXA{ob2};
+	Gkl_A_tKW = Gkl_A_tKW +   IPtotCoeff*X{ob}'*(G{ob, ob2})*tKW{ob2};
+    	diagGkl_A_X = diagGkl_A_X  +  IPtotCoeff*X{ob}'*(diag(G{ob,ob2}*OneX{ob2}))*X{ob};
+        diagGkl_A_K = diagGkl_A_K +   IPtotCoeff*X{ob}'*(diag(G{ob,ob2}*OneX{ob2}))*K{ob};
+	
+	Gkl_W_tXA = Gkl_W_tXA +   IPtotCoeff*K{ob}'*(G{ob, ob2})*tXA{ob2};
+	Gkl_W_tKW = Gkl_W_tKW +   IPtotCoeff*K{ob}'*(G{ob, ob2})*tKW{ob2};
+	diagGkl_W_X = diagGkl_W_X +  IPtotCoeff*K{ob}'*(diag(G{ob,ob2}*OneX{ob2}))*X{ob};
+	diagGkl_W_K = diagGkl_W_K +   IPtotCoeff*K{ob}'*(diag(G{ob,ob2}*OneX{ob2}))*K{ob};
+      end
+        
+      %% CALCULATE  new  A  &  W
+      Anum = (Gkl_A_tXA + Gkl_A_tKW - (Gkk_A_K - diagGkk_A_K + diagGkl_A_K)*W{ob} - (Gkk_A_X - diagGkk_A_X)*A{ob});
+      Aden =   diagGkl_A_X;
+      
+      Wnum = (Gkl_W_tXA + Gkl_W_tKW - (Gkk_W_X - diagGkk_W_X + diagGkl_W_X)*A{ob} - (Gkk_W_K - diagGkk_W_K)*W{ob});
+      Wden =  diagGkl_W_K + lmbd2*K{ob};
+      A{ob} = Aden\Anum;
+      W{ob} = Wden\Wnum;
+  
+        
+    end
+    %#####end of A for each object#####
+    
+    %% Update shapes  
+    for ob = 1:objNum
+      tXA{ob} = X{ob}*A{ob};
+      tKW{ob} =  K{ob}*W{ob};
+      tX{ob} = tXA{ob} + tKW{ob};
+    end
+
+    if options.disp_progress
+        if(~mod(itr, options.disp_progress))
+            figure(figh), hold off;
+            for ob = 1:objNum
+                plot(tX{ob}(:,1), tX{ob}(:,2), ['o',colmark(ob)], 'MarkerSize',10, 'MarkerFaceColor', colmark(ob), 'LineWidth', 3); hold on;
+            end
+            set(gca, 'DataAspectRatio', [1 1 1]);
+            title([num2str(itr), '    sigma ', num2str(sig)]);
+        end
+        pause(0.01);
+    end
+    % disp(num2str(sum(sum(  compute_gauss_K(Y, X, 1) / (lenY*lenX)  ))));
+    
+    
+    if(~mod(itr,2))
+      sig = max(sig*anealing, options.final_sigma);
+    end
+
+end
+
+for ob = 1:objNum
+    tX{ob} = X{ob}*A{ob} + K{ob}*W{ob};
+end
+close figh;
+end
+%--------------------------------------------------------------------------
+
+
+
+function options = verifyFields(options, default)
+% Performs parameter verification of the options struct 
+
+% Complete unset fields with defaults;
+default_fields = fieldnames(default);
+for iFld = 1 : length(default_fields)
+    if ~isfield(options, default_fields{iFld})
+      options.(default_fields{iFld}) = default.(default_fields{iFld});
+    end
+end
+
+if ~any(strcmp(options.nonrigid, {'TPS', 'GaussianRBF'}))
+  warning('Invalid basis function type, Setting to default');
+  options.nonrigid = default.nonrigid;
+end   
+
+if options.regularization < 0
+  warning('Regularization must be a nonnegative scalar. Setting to default');
+  options.regularization = default.regularization;
+end
+
+if options.init_sigma <= 0
+  warning('Initial bandwidth must be greater than zero. Setting to default');
+  options.init_sigma = default.init_sigma;
+end
+
+if options.final_sigma <= 0
+  warning('Final bandwidth must be greater than zero. Setting to default');
+  options.final_sigma = default.final_sigma;
+end
+
+if options.anealing > 1 || options.anealing <=0
+   warning('Anealing rate must be in the range (0, 1]. Setting to default');
+   options.anelaing = default.anealing;
+end 
+
+if options.max_iter < 10 
+   warning('Maximum number of iterations is too small. Setting to default');
+   options.max_iter = default.max_iter;
+elseif options.max_iter > 10000
+   warning('Maximun number of itearations cannot be larger than 10000. max_iter will be set to 10000');
+   options.max_iter = 10000;
+end
+
+if options.disp_progress < 0 
+   warning('Invalid value for display intervals. Setting display to false');
+   options.disp_progress = false;
+elseif options.disp_progress > options.max_iter
+   warning('Value for display intervals is larger than the maximun number of iterations. No progress will be displayed');
+end
+
+end

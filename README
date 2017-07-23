@@ -1,0 +1,10 @@
+This code reproduces all experimental results in the paper 
+"Group-wise point-set registration based on Renyi's second order entropy"
+
+Before running the main routine in ./examples/all_experiments.m, Download
+    T. Chen's  code for group-wise point-set registration using CDF Havrda-Charvát Divergence
+    This can be done by executing ./lib/external/download_cdfHC.sh
+
+To run the faces demo in ./exmaples/run_face_demo.h
+download the face data by running the script
+    ./data/download_face_data.sh
